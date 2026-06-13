@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build
+dist/
+build/
+.expo/
+web-build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage/
+
+# Native
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+google-services.json
+GoogleService-Info.plist
+
+# EAS
+.eas/

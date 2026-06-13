@@ -1,0 +1,71 @@
+{
+  "expo": {
+    "name": "StrangerConnect",
+    "slug": "stranger-connect",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "strangerconnect",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0A"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.strangerconnect.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "StrangerConnect needs camera access for video chat.",
+        "NSMicrophoneUsageDescription": "StrangerConnect needs microphone access for video chat."
+      }
+    },
+    "android": {
+      "package": "com.strangerconnect.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0A0A",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "VIBRATE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow StrangerConnect to access your camera for video chat.",
+          "microphonePermission": "Allow StrangerConnect to access your microphone for video chat.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#7C3AED"
+        }
+      ],
+      "@config-plugins/react-native-webrtc"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "your-eas-project-id"
+      }
+    }
+  }
+}
