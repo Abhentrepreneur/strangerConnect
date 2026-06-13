@@ -44,22 +44,24 @@ function getLocalHost(): string {
   return devHost || 'localhost';
 }
 
-/** API base URL — always Railway in release builds */
+/** API base URL — Railway in release; env override supported in dev */
 export function getApiUrl(): string {
   if (isLocalDevEnabled()) {
     return `http://${getLocalHost()}:3000/api/v1`;
   }
 
-  return normalizeApiUrl(getExtra().apiUrl || PRODUCTION_API_URL);
+  const envUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
+  return normalizeApiUrl(envUrl || getExtra().apiUrl || PRODUCTION_API_URL);
 }
 
-/** Socket.IO server URL — always Railway in release builds */
+/** Socket.IO server URL — Railway in release; env override supported in dev */
 export function getSocketUrl(): string {
   if (isLocalDevEnabled()) {
     return `http://${getLocalHost()}:3000`;
   }
 
-  return stripTrailingSlash(getExtra().socketUrl || PRODUCTION_SOCKET_URL);
+  const envUrl = process.env.EXPO_PUBLIC_SOCKET_URL?.trim();
+  return stripTrailingSlash(envUrl || getExtra().socketUrl || PRODUCTION_SOCKET_URL);
 }
 
 export function isSecureServer(): boolean {

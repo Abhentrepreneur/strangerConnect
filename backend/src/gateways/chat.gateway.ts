@@ -26,8 +26,10 @@ interface AuthenticatedSocket extends Socket {
   data: { user: { sub: string; email: string; isGuest: boolean } };
 }
 
+const DISCONNECT_GRACE_MS = 20_000;
+
 @WebSocketGateway({
-  cors: { origin: '*', credentials: true },
+  cors: { origin: '*', credentials: false },
   namespace: '/chat',
   transports: ['polling', 'websocket'],
   pingTimeout: 60_000,
@@ -38,7 +40,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   server: Server;
 
   private readonly logger = new Logger(ChatGateway.name);
-  private readonly userSessions = new Map<string, string>();
+  private readonly pendingDisconnects = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly matchingService: MatchingService,
@@ -68,7 +70,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.data.user = payload;
       await this.redisService.setOnline(payload.sub, client.id);
 
-      const sessionId = this.userSessions.get(payload.sub);
+      const pendingTimer = this.pendingDisconnects.get(payload.sub);
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        this.pendingDisconnects.delete(payload.sub);
+        this.logger.log(`Client ${client.id} reconnected within grace period`);
+      }
+
+      const sessionId = await this.redisService.getUserSession(payload.sub);
       if (sessionId) {
         await this.redisService.updateSessionSocket(sessionId, payload.sub, client.id);
       }
@@ -82,15 +91,28 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleDisconnect(client: AuthenticatedSocket) {
     const userId = client.data?.user?.sub;
-    if (userId) {
-      await this.matchingService.leaveQueue(userId);
-      const sessionId = this.userSessions.get(userId);
-      if (sessionId) {
-        await this.notifyPartnerDisconnect(sessionId, userId);
-        this.userSessions.delete(userId);
-      }
-      await this.redisService.removeOnline(userId);
+    if (!userId) {
+      this.logger.log(`Client disconnected: ${client.id}`);
+      return;
     }
+
+    await this.matchingService.leaveQueue(userId);
+    await this.redisService.removeOnline(userId);
+
+    const sessionId = await this.redisService.getUserSession(userId);
+    if (sessionId) {
+      const existingTimer = this.pendingDisconnects.get(userId);
+      if (existingTimer) clearTimeout(existingTimer);
+
+      const timer = setTimeout(async () => {
+        this.pendingDisconnects.delete(userId);
+        await this.notifyPartnerDisconnect(sessionId, userId);
+        await this.redisService.deleteUserSession(userId);
+      }, DISCONNECT_GRACE_MS);
+
+      this.pendingDisconnects.set(userId, timer);
+    }
+
     this.logger.log(`Client disconnected: ${client.id}`);
   }
 
@@ -106,17 +128,21 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const result = await this.matchingService.joinQueue(userId, client.id, dto);
 
     if (result.matched && result.sessionId && result.partner) {
-      this.userSessions.set(userId, result.sessionId);
+      await this.redisService.setUserSession(userId, result.sessionId);
 
       const session = await this.redisService.getSession(result.sessionId);
-      const partnerSocketId = session?.socket2;
+      if (!session) return;
+
+      const partnerUserId = session.user2;
+      const partnerSocketId = await this.resolvePartnerSocket(session, partnerUserId);
 
       client.emit('match_found', {
         sessionId: result.sessionId,
         partner: result.partner,
+        isInitiator: true,
       });
 
-      if (partnerSocketId) {
+      if (partnerSocketId && partnerUserId) {
         const currentUser = await this.userRepository.findById(userId);
         this.server.to(partnerSocketId).emit('match_found', {
           sessionId: result.sessionId,
@@ -126,12 +152,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
             avatar: currentUser?.avatar,
             country: currentUser?.country,
           },
+          isInitiator: false,
         });
 
-        const partnerUserId = session?.user2;
-        if (partnerUserId) {
-          this.userSessions.set(partnerUserId, result.sessionId);
-        }
+        await this.redisService.setUserSession(partnerUserId, result.sessionId);
       }
     } else {
       const stats = await this.matchingService.getQueueStats();
@@ -143,12 +167,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('next_user')
   async handleNextUser(@ConnectedSocket() client: AuthenticatedSocket) {
     const userId = client.data.user.sub;
-    const sessionId = this.userSessions.get(userId);
+    const sessionId = await this.redisService.getUserSession(userId);
 
     if (sessionId) {
       await this.notifyPartnerDisconnect(sessionId, userId);
       await this.matchingService.endSession(sessionId);
-      this.userSessions.delete(userId);
+      await this.redisService.deleteUserSession(userId);
     }
 
     await this.matchingService.leaveQueue(userId);
@@ -250,12 +274,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('disconnect_user')
   async handleDisconnectUser(@ConnectedSocket() client: AuthenticatedSocket) {
     const userId = client.data.user.sub;
-    const sessionId = this.userSessions.get(userId);
+    const sessionId = await this.redisService.getUserSession(userId);
 
     if (sessionId) {
       await this.notifyPartnerDisconnect(sessionId, userId);
       await this.matchingService.endSession(sessionId);
-      this.userSessions.delete(userId);
+      await this.redisService.deleteUserSession(userId);
     }
 
     client.emit('call_ended', { reason: 'user_disconnected' });
@@ -311,7 +335,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (partnerSocketId) {
       this.server.to(partnerSocketId).emit('disconnect_user', { reason: 'partner_left' });
-      this.userSessions.delete(partnerId);
+      await this.redisService.deleteUserSession(partnerId);
     }
   }
 

@@ -64,7 +64,7 @@ export type RootStackParamList = {
   Auth: undefined;
   Main: undefined;
   Matching: undefined;
-  VideoChat: { sessionId: string; partner: Partner };
+  VideoChat: { sessionId: string; partner: Partner; isInitiator: boolean };
   Profile: undefined;
   EditProfile: undefined;
   Subscription: undefined;

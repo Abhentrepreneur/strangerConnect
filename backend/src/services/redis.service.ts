@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import Redis from 'ioredis';
+import Redis, { RedisOptions } from 'ioredis';
 
 export interface QueueEntry {
   userId: string;
@@ -17,36 +17,38 @@ export interface QueueEntry {
 export class RedisService implements OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
   private readonly client: Redis;
+  private readonly pubClient: Redis;
+  private readonly subClient: Redis;
   private connected = false;
 
   private readonly QUEUE_KEY = 'matchmaking:queue';
   private readonly SESSION_PREFIX = 'session:';
   private readonly ONLINE_PREFIX = 'online:';
+  private readonly USER_SESSION_PREFIX = 'user:session:';
 
-  // In-memory fallback when Redis is unavailable
+  // In-memory fallback when Redis is unavailable (dev only)
   private readonly memoryQueue: QueueEntry[] = [];
   private readonly memorySessions = new Map<string, Record<string, string>>();
   private readonly memoryOnline = new Map<string, string>();
+  private readonly memoryUserSessions = new Map<string, string>();
 
   constructor(private readonly configService: ConfigService) {
-    this.client = new Redis({
-      host: this.configService.get<string>('redis.host'),
-      port: this.configService.get<number>('redis.port'),
-      password: this.configService.get<string>('redis.password'),
-      maxRetriesPerRequest: 3,
-      lazyConnect: true,
-      retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 2000)),
-    });
+    const options = this.buildRedisOptions();
+    this.client = new Redis(options);
+    this.pubClient = new Redis(options);
+    this.subClient = this.pubClient.duplicate();
 
-    this.client.on('connect', () => {
-      this.connected = true;
-      this.logger.log('Redis connected');
-    });
+    for (const redis of [this.client, this.pubClient, this.subClient]) {
+      redis.on('connect', () => {
+        this.connected = true;
+        this.logger.log('Redis connected');
+      });
 
-    this.client.on('error', (err) => {
-      this.connected = false;
-      this.logger.warn(`Redis error: ${err.message}. Using in-memory fallback.`);
-    });
+      redis.on('error', (err) => {
+        this.connected = false;
+        this.logger.warn(`Redis error: ${err.message}. Using in-memory fallback.`);
+      });
+    }
 
     this.client.connect().catch((err) => {
       this.connected = false;
@@ -54,14 +56,58 @@ export class RedisService implements OnModuleDestroy {
     });
   }
 
-  async onModuleDestroy() {
-    if (this.connected) {
-      await this.client.quit();
+  private buildRedisOptions(): RedisOptions {
+    const redisUrl = this.configService.get<string>('redis.url');
+    if (redisUrl) {
+      return {
+        ...this.parseRedisUrl(redisUrl),
+        maxRetriesPerRequest: 3,
+        lazyConnect: true,
+        retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 2000)),
+      };
     }
+
+    const tlsEnabled = this.configService.get<boolean>('redis.tls');
+    return {
+      host: this.configService.get<string>('redis.host'),
+      port: this.configService.get<number>('redis.port'),
+      password: this.configService.get<string>('redis.password'),
+      ...(tlsEnabled ? { tls: {} } : {}),
+      maxRetriesPerRequest: 3,
+      lazyConnect: true,
+      retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 2000)),
+    };
+  }
+
+  private parseRedisUrl(url: string): RedisOptions {
+    const parsed = new URL(url);
+    const db = parsed.pathname.length > 1 ? parseInt(parsed.pathname.slice(1), 10) : undefined;
+    const useTls = parsed.protocol === 'rediss:';
+
+    return {
+      host: parsed.hostname,
+      port: parsed.port ? parseInt(parsed.port, 10) : useTls ? 6380 : 6379,
+      password: parsed.password || undefined,
+      username: parsed.username || undefined,
+      db: Number.isFinite(db) ? db : undefined,
+      ...(useTls ? { tls: {} } : {}),
+    };
+  }
+
+  async onModuleDestroy() {
+    await Promise.allSettled([
+      this.client.quit(),
+      this.pubClient.quit(),
+      this.subClient.quit(),
+    ]);
   }
 
   getClient(): Redis {
     return this.client;
+  }
+
+  getPubSubClients(): { pubClient: Redis; subClient: Redis } {
+    return { pubClient: this.pubClient, subClient: this.subClient };
   }
 
   private async ensureConnected(): Promise<boolean> {
@@ -103,13 +149,11 @@ export class RedisService implements OnModuleDestroy {
           break;
         }
       }
-      await this.removeOnline(userId);
       return;
     }
 
     const idx = this.memoryQueue.findIndex((e) => e.userId === userId);
     if (idx >= 0) this.memoryQueue.splice(idx, 1);
-    this.memoryOnline.delete(userId);
   }
 
   async findMatch(entry: QueueEntry, blockedIds: string[]): Promise<QueueEntry | null> {
@@ -146,7 +190,6 @@ export class RedisService implements OnModuleDestroy {
   }
 
   private isCompatible(a: QueueEntry, b: QueueEntry): boolean {
-    // Only apply filters when user explicitly chose preferences in join_queue
     if (a.country && b.country && a.country !== b.country) return false;
     if (a.language && b.language && a.language !== b.language) return false;
     if (a.gender && b.gender && a.gender !== b.gender) return false;
@@ -205,9 +248,32 @@ export class RedisService implements OnModuleDestroy {
     await this.setOnline(userId, socketId);
   }
 
+  async setUserSession(userId: string, sessionId: string): Promise<void> {
+    if (await this.ensureConnected()) {
+      await this.client.set(`${this.USER_SESSION_PREFIX}${userId}`, sessionId, 'EX', 3600);
+      return;
+    }
+    this.memoryUserSessions.set(userId, sessionId);
+  }
+
+  async getUserSession(userId: string): Promise<string | null> {
+    if (await this.ensureConnected()) {
+      return this.client.get(`${this.USER_SESSION_PREFIX}${userId}`);
+    }
+    return this.memoryUserSessions.get(userId) ?? null;
+  }
+
+  async deleteUserSession(userId: string): Promise<void> {
+    if (await this.ensureConnected()) {
+      await this.client.del(`${this.USER_SESSION_PREFIX}${userId}`);
+      return;
+    }
+    this.memoryUserSessions.delete(userId);
+  }
+
   async setOnline(userId: string, socketId: string): Promise<void> {
     if (await this.ensureConnected()) {
-      await this.client.set(`${this.ONLINE_PREFIX}${userId}`, socketId, 'EX', 300);
+      await this.client.set(`${this.ONLINE_PREFIX}${userId}`, socketId, 'EX', 3600);
       return;
     }
     this.memoryOnline.set(userId, socketId);

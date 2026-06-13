@@ -10,7 +10,12 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
 
-  app.useWebSocketAdapter(new RailwaySocketIoAdapter(app));
+  const socketAdapter = new RailwaySocketIoAdapter(app);
+  await socketAdapter.connectToRedis();
+  app.useWebSocketAdapter(socketAdapter);
+
+  const httpServer = app.getHttpAdapter().getInstance();
+  httpServer.set('trust proxy', 1);
 
   app.use(
     helmet({

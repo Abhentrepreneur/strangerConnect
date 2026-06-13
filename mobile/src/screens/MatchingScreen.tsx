@@ -16,6 +16,7 @@ import { useChatStore } from '../store/chatStore';
 import { COLORS, GRADIENTS } from '../constants';
 import { RootStackParamList } from '../types';
 import { getErrorMessage } from '../utils/errors';
+import { requestMediaPermissions, hasRequiredMediaPermissions } from '../utils/permissions';
 
 interface MatchingScreenProps {
   navigation: NativeStackNavigationProp<RootStackParamList, 'Matching'>;
@@ -41,12 +42,22 @@ export function MatchingScreen({ navigation }: MatchingScreenProps) {
 
     const init = async () => {
       try {
+        const permissions = await requestMediaPermissions();
+        if (!hasRequiredMediaPermissions(permissions)) {
+          Alert.alert(
+            'Microphone Required',
+            'Please allow microphone access in your phone settings before starting a video chat.',
+            [{ text: 'Go Back', onPress: () => navigation.goBack() }],
+          );
+          return;
+        }
+
         setSearching(true);
         await socketService.connect();
 
-        socketService.on('match_found', ({ sessionId, partner }) => {
+        socketService.on('match_found', ({ sessionId, partner, isInitiator }) => {
           setMatch(sessionId, partner);
-          navigation.replace('VideoChat', { sessionId, partner });
+          navigation.replace('VideoChat', { sessionId, partner, isInitiator });
         });
 
         socketService.on('searching', (stats) => {

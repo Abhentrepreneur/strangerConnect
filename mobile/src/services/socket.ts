@@ -1,10 +1,17 @@
+import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 import * as SecureStore from 'expo-secure-store';
 import { ChatMessage, Partner, QueueStats } from '../types';
-import { getSocketUrl, isSecureServer } from '../utils/config';
+import { getApiUrl, getSocketUrl, isSecureServer } from '../utils/config';
+
+type MatchFoundPayload = {
+  sessionId: string;
+  partner: Partner;
+  isInitiator: boolean;
+};
 
 type SocketEvents = {
-  match_found: (data: { sessionId: string; partner: Partner }) => void;
+  match_found: (data: MatchFoundPayload) => void;
   searching: (stats: QueueStats) => void;
   receive_message: (message: ChatMessage) => void;
   typing: (data: { sessionId: string; isTyping: boolean }) => void;
@@ -34,7 +41,23 @@ class SocketService {
     }
   }
 
-  private async createConnection(): Promise<Socket> {
+  private async refreshAccessToken(): Promise<string> {
+    const refreshToken = await SecureStore.getItemAsync('refreshToken');
+    if (!refreshToken) {
+      throw new Error('Session expired. Please log in again.');
+    }
+
+    const { data } = await axios.post<{ accessToken: string; refreshToken: string }>(
+      `${getApiUrl()}/auth/refresh`,
+      { refreshToken },
+    );
+
+    await SecureStore.setItemAsync('accessToken', data.accessToken);
+    await SecureStore.setItemAsync('refreshToken', data.refreshToken);
+    return data.accessToken;
+  }
+
+  private async createConnection(retryWithRefresh = true): Promise<Socket> {
     const token = await SecureStore.getItemAsync('accessToken');
     if (!token) {
       throw new Error('Not authenticated. Please log in again.');
@@ -49,18 +72,17 @@ class SocketService {
       upgrade: true,
       rememberUpgrade: true,
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: 15,
       reconnectionDelay: 1500,
-      reconnectionDelayMax: 8000,
-      timeout: 30_000,
+      reconnectionDelayMax: 10_000,
+      timeout: 45_000,
       secure: isSecureServer(),
-      forceNew: true,
       autoConnect: true,
     });
 
     this.socket.on('connect_error', () => {
       if (this.socket && !this.socket.connected) {
-        this.socket.io.opts.transports = ['polling'];
+        this.socket.io.opts.transports = ['polling', 'websocket'];
       }
     });
 
@@ -72,18 +94,39 @@ class SocketService {
 
       const timeout = setTimeout(() => {
         reject(new Error('Socket connection timed out. Check your internet connection.'));
-      }, 30_000);
+      }, 45_000);
 
       this.socket.once('connect', () => {
         clearTimeout(timeout);
         resolve(this.socket!);
       });
 
-      this.socket.once('connect_error', (err: Error) => {
+      this.socket.once('connect_error', async (err: Error) => {
         clearTimeout(timeout);
-        const message = err.message?.includes('auth')
-          ? 'Session expired. Please log in again.'
-          : err.message || 'Could not connect to chat server.';
+        const message = err.message || 'Could not connect to chat server.';
+        const isAuthError =
+          message.toLowerCase().includes('auth') ||
+          message.toLowerCase().includes('token') ||
+          message.toLowerCase().includes('jwt');
+
+        if (retryWithRefresh && isAuthError) {
+          try {
+            await this.refreshAccessToken();
+            this.socket?.removeAllListeners();
+            this.socket?.disconnect();
+            this.socket = null;
+            resolve(await this.createConnection(false));
+            return;
+          } catch (refreshError) {
+            reject(
+              refreshError instanceof Error
+                ? refreshError
+                : new Error('Session expired. Please log in again.'),
+            );
+            return;
+          }
+        }
+
         reject(new Error(message));
       });
     });

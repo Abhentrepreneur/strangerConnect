@@ -21,6 +21,7 @@ import { useChatStore } from '../store/chatStore';
 import { useAuthStore } from '../store/authStore';
 import { COLORS } from '../constants';
 import { RootStackParamList, ChatMessage } from '../types';
+import { classifyMediaError } from '../utils/mediaErrors';
 
 interface VideoChatScreenProps {
   navigation: NativeStackNavigationProp<RootStackParamList, 'VideoChat'>;
@@ -28,7 +29,7 @@ interface VideoChatScreenProps {
 }
 
 export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
-  const { sessionId, partner } = route.params;
+  const { sessionId, partner, isInitiator } = route.params;
   const { user } = useAuthStore();
   const {
     messages,
@@ -50,7 +51,9 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
   const [callDuration, setCallDuration] = useState(0);
   const [localStreamUrl, setLocalStreamUrl] = useState<string | null>(null);
   const [remoteStreamUrl, setRemoteStreamUrl] = useState<string | null>(null);
+  const [hasLocalVideo, setHasLocalVideo] = useState(true);
   const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initStarted = useRef(false);
 
   const endCall = useCallback(() => {
     webrtcService.cleanup();
@@ -60,37 +63,42 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
   }, [navigation, reset]);
 
   useEffect(() => {
+    if (initStarted.current) return;
+    initStarted.current = true;
+
+    webrtcService.onRemoteStream = (remoteStream) => {
+      remoteStream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+      setRemoteStreamUrl(remoteStream.toURL());
+    };
+
+    webrtcService.onNetworkQuality = setNetworkQuality;
+
+    webrtcService.onConnectionFailed = (message) => {
+      Alert.alert('Media Connection Failed', message, [
+        { text: 'End Call', onPress: endCall, style: 'destructive' },
+        { text: 'Keep Trying', style: 'cancel' },
+      ]);
+    };
+
     const init = async () => {
       try {
         if (!socketService.isConnected()) {
           await socketService.connect();
         }
 
-        const isInitiator = user?.id ? user.id < partner.id : true;
         const stream = await webrtcService.initialize(sessionId, isInitiator);
         setLocalStreamUrl(stream.toURL());
+        setHasLocalVideo(webrtcService.hasLocalVideo());
 
-        webrtcService.onRemoteStream = (remoteStream) => {
-          remoteStream.getAudioTracks().forEach((track) => {
-            track.enabled = true;
-          });
-          setRemoteStreamUrl(remoteStream.toURL());
-        };
-
-        webrtcService.onNetworkQuality = setNetworkQuality;
+        const existingRemote = webrtcService.getRemoteStream();
+        if (existingRemote) {
+          setRemoteStreamUrl(existingRemote.toURL());
+        }
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : 'Failed to start video chat.';
-        const isPermission =
-          message.toLowerCase().includes('permission') ||
-          message.toLowerCase().includes('not allowed');
-
-        Alert.alert(
-          isPermission ? 'Permissions Required' : 'Connection Failed',
-          isPermission
-            ? 'Please allow camera and microphone access in your phone settings, then try again.'
-            : message,
-        );
+        const { title, message } = classifyMediaError(error);
+        Alert.alert(title, message, [{ text: 'OK', onPress: endCall }]);
       }
     };
 
@@ -110,20 +118,28 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
       ]);
     });
 
-    const timer = setInterval(() => {
-      if (callStartTime) {
-        setCallDuration(Math.floor((Date.now() - callStartTime) / 1000));
-      }
-    }, 1000);
+    socketService.on('call_ended', () => {
+      endCall();
+    });
 
     return () => {
-      clearInterval(timer);
       webrtcService.cleanup();
       socketService.off('receive_message');
       socketService.off('typing');
       socketService.off('disconnect_user');
+      socketService.off('call_ended');
     };
-  }, [sessionId, partner.id, user?.id, callStartTime, addMessage, setTyping, setNetworkQuality, endCall]);
+  }, [sessionId, isInitiator, addMessage, setTyping, setNetworkQuality, endCall]);
+
+  useEffect(() => {
+    if (!callStartTime) return;
+
+    const timer = setInterval(() => {
+      setCallDuration(Math.floor((Date.now() - callStartTime) / 1000));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [callStartTime]);
 
   const formatDuration = (seconds: number) => {
     const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -207,10 +223,11 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
           </Text>
           <Text style={styles.placeholderName}>{partner.username || 'Stranger'}</Text>
           <Text style={styles.placeholderCountry}>{partner.country || 'Unknown'}</Text>
+          <Text style={styles.connectingText}>Connecting video...</Text>
         </View>
       )}
 
-      {localStreamUrl && isVideoEnabled && (
+      {localStreamUrl && isVideoEnabled && hasLocalVideo && (
         <View style={styles.localVideoContainer}>
           <RTCView streamURL={localStreamUrl} style={styles.localVideo} objectFit="cover" mirror />
         </View>
@@ -311,6 +328,11 @@ const styles = StyleSheet.create({
     color: COLORS.muted,
     fontSize: 14,
     marginTop: 4,
+  },
+  connectingText: {
+    color: COLORS.muted,
+    fontSize: 14,
+    marginTop: 16,
   },
   localVideoContainer: {
     position: 'absolute',

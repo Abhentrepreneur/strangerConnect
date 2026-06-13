@@ -15,6 +15,13 @@ export class WsJwtGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const client = context.switchToWs().getClient<Socket>();
+
+    // Trust the authenticated user from the initial WebSocket handshake.
+    // Re-verifying the JWT on every message breaks long calls after token expiry.
+    if (client.data?.user?.sub) {
+      return true;
+    }
+
     const token =
       client.handshake.auth?.token ||
       client.handshake.headers?.authorization?.replace('Bearer ', '');
