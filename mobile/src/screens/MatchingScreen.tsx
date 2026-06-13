@@ -57,7 +57,7 @@ export function MatchingScreen({ navigation }: MatchingScreenProps) {
       } catch (error) {
         Alert.alert(
           'Connection Failed',
-          getErrorMessage(error, 'Could not connect to chat server.'),
+          getErrorMessage(error, 'Could not connect to chat server. Check your internet and try again.'),
           [{ text: 'Go Back', onPress: () => navigation.goBack() }],
         );
       }

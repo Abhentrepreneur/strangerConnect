@@ -8,6 +8,8 @@ import {
   MessageBody,
 } from '@nestjs/websockets';
 import { Logger, UseGuards } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { WsJwtGuard } from '../common/guards/ws-jwt.guard';
 import { MatchingService } from '../modules/matching/matching.service';
@@ -25,8 +27,11 @@ interface AuthenticatedSocket extends Socket {
 }
 
 @WebSocketGateway({
-  cors: { origin: '*' },
+  cors: { origin: '*', credentials: true },
   namespace: '/chat',
+  transports: ['polling', 'websocket'],
+  pingTimeout: 60_000,
+  pingInterval: 25_000,
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
@@ -41,10 +46,38 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly reportsService: ReportsService,
     private readonly redisService: RedisService,
     private readonly userRepository: UserRepository,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
   ) {}
 
   async handleConnection(client: AuthenticatedSocket) {
-    this.logger.log(`Client connected: ${client.id}`);
+    const token =
+      client.handshake.auth?.token ||
+      client.handshake.headers?.authorization?.replace('Bearer ', '');
+
+    if (!token) {
+      this.logger.warn(`Client ${client.id} rejected: no token`);
+      client.disconnect(true);
+      return;
+    }
+
+    try {
+      const payload = await this.jwtService.verifyAsync(token, {
+        secret: this.configService.get<string>('jwt.secret'),
+      });
+      client.data.user = payload;
+      await this.redisService.setOnline(payload.sub, client.id);
+
+      const sessionId = this.userSessions.get(payload.sub);
+      if (sessionId) {
+        await this.redisService.updateSessionSocket(sessionId, payload.sub, client.id);
+      }
+
+      this.logger.log(`Client connected: ${client.id} (user ${payload.sub})`);
+    } catch {
+      this.logger.warn(`Client ${client.id} rejected: invalid token`);
+      client.disconnect(true);
+    }
   }
 
   async handleDisconnect(client: AuthenticatedSocket) {
@@ -68,6 +101,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: JoinQueueDto,
   ) {
     const userId = client.data.user.sub;
+    await this.redisService.setOnline(userId, client.id);
+
     const result = await this.matchingService.joinQueue(userId, client.id, dto);
 
     if (result.matched && result.sessionId && result.partner) {
@@ -139,7 +174,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!session) return;
 
     const partnerId = session.user1 === userId ? session.user2 : session.user1;
-    const partnerSocketId = await this.redisService.getSocketId(partnerId);
+    const partnerSocketId = await this.resolvePartnerSocket(session, partnerId);
 
     const payload = {
       id: message._id.toString(),
@@ -166,7 +201,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!session) return;
 
     const partnerId = session.user1 === userId ? session.user2 : session.user1;
-    const partnerSocketId = await this.redisService.getSocketId(partnerId);
+    const partnerSocketId = await this.resolvePartnerSocket(session, partnerId);
 
     if (partnerSocketId) {
       this.server.to(partnerSocketId).emit('typing', { sessionId: data.sessionId, isTyping: data.isTyping });
@@ -248,11 +283,23 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!session) return;
 
     const partnerId = session.user1 === userId ? session.user2 : session.user1;
-    const partnerSocketId = await this.redisService.getSocketId(partnerId);
+    const partnerSocketId = await this.resolvePartnerSocket(session, partnerId);
 
     if (partnerSocketId) {
       this.server.to(partnerSocketId).emit(event, { sessionId, ...payload });
     }
+  }
+
+  private async resolvePartnerSocket(
+    session: Record<string, string>,
+    partnerId: string,
+  ): Promise<string | null> {
+    const liveSocketId = await this.redisService.getSocketId(partnerId);
+    if (liveSocketId) return liveSocketId;
+
+    if (session.user1 === partnerId) return session.socket1 || null;
+    if (session.user2 === partnerId) return session.socket2 || null;
+    return null;
   }
 
   private async notifyPartnerDisconnect(sessionId: string, userId: string) {
@@ -260,7 +307,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!session) return;
 
     const partnerId = session.user1 === userId ? session.user2 : session.user1;
-    const partnerSocketId = await this.redisService.getSocketId(partnerId);
+    const partnerSocketId = await this.resolvePartnerSocket(session, partnerId);
 
     if (partnerSocketId) {
       this.server.to(partnerSocketId).emit('disconnect_user', { reason: 'partner_left' });

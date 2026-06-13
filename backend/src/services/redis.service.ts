@@ -146,7 +146,10 @@ export class RedisService implements OnModuleDestroy {
   }
 
   private isCompatible(a: QueueEntry, b: QueueEntry): boolean {
+    // Only apply filters when user explicitly chose preferences in join_queue
     if (a.country && b.country && a.country !== b.country) return false;
+    if (a.language && b.language && a.language !== b.language) return false;
+    if (a.gender && b.gender && a.gender !== b.gender) return false;
     if (a.interests?.length && b.interests?.length) {
       const overlap = a.interests.some((i) => b.interests?.includes(i));
       if (!overlap) return false;
@@ -184,6 +187,22 @@ export class RedisService implements OnModuleDestroy {
       return;
     }
     this.memorySessions.delete(sessionId);
+  }
+
+  async updateSessionSocket(sessionId: string, userId: string, socketId: string): Promise<void> {
+    const session = await this.getSession(sessionId);
+    if (!session) return;
+
+    if (session.user1 === userId) {
+      session.socket1 = socketId;
+    } else if (session.user2 === userId) {
+      session.socket2 = socketId;
+    } else {
+      return;
+    }
+
+    await this.setSession(sessionId, session);
+    await this.setOnline(userId, socketId);
   }
 
   async setOnline(userId: string, socketId: string): Promise<void> {

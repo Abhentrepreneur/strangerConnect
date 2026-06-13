@@ -7,8 +7,13 @@ import {
 } from 'react-native-webrtc';
 import { ICE_SERVERS } from '../constants';
 import { socketService } from './socket';
+import { requestMediaPermissions } from '../utils/permissions';
 
 export type NetworkQuality = 'excellent' | 'good' | 'fair' | 'poor';
+
+type SignalOffer = { sessionId: string; offer: RTCSessionDescriptionInit };
+type SignalAnswer = { sessionId: string; answer: RTCSessionDescriptionInit };
+type SignalCandidate = { sessionId: string; candidate: RTCIceCandidateInit };
 
 class WebRTCService {
   private peerConnection: RTCPeerConnection | null = null;
@@ -16,6 +21,13 @@ class WebRTCService {
   private remoteStream: MediaStream | null = null;
   private sessionId: string | null = null;
   private isInitiator = false;
+  private isReady = false;
+  private pendingOffer: SignalOffer | null = null;
+  private pendingCandidates: RTCIceCandidateInit[] = [];
+
+  private readonly onOffer = (data: SignalOffer) => void this.handleOffer(data);
+  private readonly onAnswer = (data: SignalAnswer) => void this.handleAnswer(data);
+  private readonly onCandidate = (data: SignalCandidate) => void this.handleCandidate(data);
 
   onRemoteStream?: (stream: MediaStream) => void;
   onNetworkQuality?: (quality: NetworkQuality) => void;
@@ -24,28 +36,80 @@ class WebRTCService {
     this.sessionId = sessionId;
     this.isInitiator = isInitiator;
 
+    this.attachSocketListeners();
+
+    const granted = await requestMediaPermissions();
+    if (!granted) {
+      throw new Error('Camera and microphone permissions are required for video chat.');
+    }
+
+    this.peerConnection = new RTCPeerConnection({
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 10,
+    });
+
+    this.setupPeerConnectionHandlers();
+
     this.localStream = await mediaDevices.getUserMedia({
-      audio: true,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
       video: {
         facingMode: 'user',
         width: { ideal: 1280 },
         height: { ideal: 720 },
-        frameRate: { ideal: 30 },
+        frameRate: { ideal: 24 },
       },
     });
 
-    this.peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
     this.localStream.getTracks().forEach((track) => {
+      track.enabled = true;
       this.peerConnection?.addTrack(track, this.localStream!);
     });
 
+    this.isReady = true;
+
+    if (this.pendingOffer) {
+      await this.handleOffer(this.pendingOffer);
+      this.pendingOffer = null;
+    } else if (isInitiator) {
+      await this.createOffer();
+    }
+
+    await this.drainPendingCandidates();
+
+    return this.localStream;
+  }
+
+  private attachSocketListeners() {
+    socketService.off('webrtc_offer', this.onOffer);
+    socketService.off('webrtc_answer', this.onAnswer);
+    socketService.off('webrtc_ice_candidate', this.onCandidate);
+
+    socketService.on('webrtc_offer', this.onOffer);
+    socketService.on('webrtc_answer', this.onAnswer);
+    socketService.on('webrtc_ice_candidate', this.onCandidate);
+  }
+
+  private setupPeerConnectionHandlers() {
+    if (!this.peerConnection) return;
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this.peerConnection as any).ontrack = (event: { streams?: MediaStream[] }) => {
-      if (event.streams?.[0]) {
-        this.remoteStream = event.streams[0];
-        this.onRemoteStream?.(event.streams[0]);
-      }
+    (this.peerConnection as any).ontrack = (event: { streams?: MediaStream[]; track?: MediaStreamTrack }) => {
+      const stream = event.streams?.[0];
+      if (!stream) return;
+
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
+      stream.getVideoTracks().forEach((track) => {
+        track.enabled = true;
+      });
+
+      this.remoteStream = stream;
+      this.onRemoteStream?.(stream);
     };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -64,41 +128,74 @@ class WebRTCService {
         this.onNetworkQuality?.('poor');
       }
     };
-
-    this.setupSocketListeners();
-
-    if (isInitiator) {
-      await this.createOffer();
-    }
-
-    return this.localStream;
   }
 
-  private setupSocketListeners() {
-    socketService.on('webrtc_offer', async ({ sessionId, offer }) => {
-      if (sessionId !== this.sessionId || !this.peerConnection) return;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer as any));
-      const answer = await this.peerConnection.createAnswer();
-      await this.peerConnection.setLocalDescription(answer);
-      socketService.sendWebRtcAnswer(sessionId, answer.toJSON());
-    });
+  private async handleOffer(data: SignalOffer) {
+    if (data.sessionId !== this.sessionId) return;
 
-    socketService.on('webrtc_answer', async ({ sessionId, answer }) => {
-      if (sessionId !== this.sessionId || !this.peerConnection) return;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer as any));
-    });
+    if (!this.isReady || !this.peerConnection) {
+      this.pendingOffer = data;
+      return;
+    }
 
-    socketService.on('webrtc_ice_candidate', async ({ sessionId, candidate }) => {
-      if (sessionId !== this.sessionId || !this.peerConnection) return;
-      await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-    });
+    if (this.peerConnection.signalingState !== 'stable' && this.peerConnection.signalingState !== 'have-local-offer') {
+      return;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer as any));
+    const answer = await this.peerConnection.createAnswer();
+    await this.peerConnection.setLocalDescription(answer);
+    socketService.sendWebRtcAnswer(data.sessionId, answer.toJSON());
+    await this.drainPendingCandidates();
+  }
+
+  private async handleAnswer(data: SignalAnswer) {
+    if (data.sessionId !== this.sessionId || !this.peerConnection) return;
+    if (this.peerConnection.signalingState !== 'have-local-offer') return;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await this.peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer as any));
+    await this.drainPendingCandidates();
+  }
+
+  private async handleCandidate(data: SignalCandidate) {
+    if (data.sessionId !== this.sessionId) return;
+
+    if (!this.peerConnection?.remoteDescription) {
+      this.pendingCandidates.push(data.candidate);
+      return;
+    }
+
+    try {
+      await this.peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+    } catch {
+      this.pendingCandidates.push(data.candidate);
+    }
+  }
+
+  private async drainPendingCandidates() {
+    if (!this.peerConnection?.remoteDescription) return;
+
+    const queued = [...this.pendingCandidates];
+    this.pendingCandidates = [];
+
+    for (const candidate of queued) {
+      try {
+        await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch {
+        // ignore stale candidates
+      }
+    }
   }
 
   private async createOffer() {
     if (!this.peerConnection || !this.sessionId) return;
-    const offer = await this.peerConnection.createOffer();
+
+    const offer = await this.peerConnection.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true,
+    });
     await this.peerConnection.setLocalDescription(offer);
     socketService.sendWebRtcOffer(this.sessionId, offer.toJSON());
   }
@@ -127,15 +224,14 @@ class WebRTCService {
     const videoTrack = this.localStream?.getVideoTracks()[0];
     if (!videoTrack) return;
 
-    // react-native-webrtc extension for camera switching
     const track = videoTrack as typeof videoTrack & { _switchCamera?: () => void };
     track._switchCamera?.();
   }
 
   cleanup() {
-    socketService.off('webrtc_offer');
-    socketService.off('webrtc_answer');
-    socketService.off('webrtc_ice_candidate');
+    socketService.off('webrtc_offer', this.onOffer);
+    socketService.off('webrtc_answer', this.onAnswer);
+    socketService.off('webrtc_ice_candidate', this.onCandidate);
 
     this.localStream?.getTracks().forEach((track) => track.stop());
     this.peerConnection?.close();
@@ -144,6 +240,9 @@ class WebRTCService {
     this.localStream = null;
     this.remoteStream = null;
     this.sessionId = null;
+    this.isReady = false;
+    this.pendingOffer = null;
+    this.pendingCandidates = [];
   }
 }
 

@@ -28,10 +28,10 @@ export class MatchingService {
     const entry: QueueEntry = {
       userId,
       socketId,
-      country: dto.country || user.country,
+      country: dto.country,
       language: dto.language,
       gender: dto.gender,
-      interests: dto.interests || user.interests,
+      interests: dto.interests,
       isPremium: user.isPremium,
       joinedAt: Date.now(),
     };

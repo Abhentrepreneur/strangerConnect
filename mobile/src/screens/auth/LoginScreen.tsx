@@ -118,11 +118,9 @@ export function LoginScreen({ navigation }: LoginScreenProps) {
           size="sm"
         />
 
-        {__DEV__ && (
-          <Text style={styles.serverHint}>
-            Server: {getResolvedServerInfo().apiUrl}
-          </Text>
-        )}
+        <Text style={styles.serverHint}>
+          Server: {getResolvedServerInfo().apiUrl}
+        </Text>
       </View>
     </KeyboardAvoidingView>
   );

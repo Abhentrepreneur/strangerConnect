@@ -3,17 +3,27 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { RailwaySocketIoAdapter } from './common/adapters/socket-io.adapter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
 
-  app.use(helmet());
+  app.useWebSocketAdapter(new RailwaySocketIoAdapter(app));
+
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    }),
+  );
 
   const corsOrigins = configService.get<string[]>('cors.origins');
+  const allowAllOrigins = corsOrigins?.includes('*');
+
   app.enableCors({
-    origin: corsOrigins,
+    origin: allowAllOrigins ? true : corsOrigins,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });

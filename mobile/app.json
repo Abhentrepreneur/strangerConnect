@@ -18,7 +18,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "StrangerConnect needs camera access for video chat.",
         "NSMicrophoneUsageDescription": "StrangerConnect needs microphone access for video chat."
-      }
+      },
+      "bitcode": false
     },
     "android": {
       "package": "com.strangerconnect.app",
@@ -33,7 +34,15 @@
         "RECORD_AUDIO",
         "INTERNET",
         "ACCESS_NETWORK_STATE",
-        "VIBRATE"
+        "VIBRATE",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.INTERNET",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
       ]
     },
     "plugins": [
@@ -64,8 +73,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "your-eas-project-id"
+        "projectId": "3b1fabae-380e-4b7a-83b2-2802b29b6b76"
       }
-    }
+    },
+    "owner": "abhi9927"
   }
 }

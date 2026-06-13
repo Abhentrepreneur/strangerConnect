@@ -1,7 +1,7 @@
 import { io, Socket } from 'socket.io-client';
 import * as SecureStore from 'expo-secure-store';
 import { ChatMessage, Partner, QueueStats } from '../types';
-import { getSocketUrl } from '../utils/config';
+import { getSocketUrl, isSecureServer } from '../utils/config';
 
 type SocketEvents = {
   match_found: (data: { sessionId: string; partner: Partner }) => void;
@@ -19,19 +19,49 @@ type SocketEvents = {
 
 class SocketService {
   private socket: Socket | null = null;
+  private connecting: Promise<Socket> | null = null;
 
   async connect(): Promise<Socket> {
     if (this.socket?.connected) return this.socket;
+    if (this.connecting) return this.connecting;
 
+    this.connecting = this.createConnection();
+
+    try {
+      return await this.connecting;
+    } finally {
+      this.connecting = null;
+    }
+  }
+
+  private async createConnection(): Promise<Socket> {
     const token = await SecureStore.getItemAsync('accessToken');
+    if (!token) {
+      throw new Error('Not authenticated. Please log in again.');
+    }
 
-    this.socket = io(`${getSocketUrl()}/chat`, {
+    const socketUrl = getSocketUrl();
+
+    this.socket = io(`${socketUrl}/chat`, {
       auth: { token },
-      transports: ['websocket', 'polling'],
+      path: '/socket.io',
+      transports: ['polling', 'websocket'],
+      upgrade: true,
+      rememberUpgrade: true,
       reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      timeout: 15000,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1500,
+      reconnectionDelayMax: 8000,
+      timeout: 30_000,
+      secure: isSecureServer(),
+      forceNew: true,
+      autoConnect: true,
+    });
+
+    this.socket.on('connect_error', () => {
+      if (this.socket && !this.socket.connected) {
+        this.socket.io.opts.transports = ['polling'];
+      }
     });
 
     return new Promise((resolve, reject) => {
@@ -41,28 +71,37 @@ class SocketService {
       }
 
       const timeout = setTimeout(() => {
-        reject(new Error('Socket connection timed out'));
-      }, 15000);
+        reject(new Error('Socket connection timed out. Check your internet connection.'));
+      }, 30_000);
 
       this.socket.once('connect', () => {
         clearTimeout(timeout);
         resolve(this.socket!);
       });
 
-      this.socket.once('connect_error', (err) => {
+      this.socket.once('connect_error', (err: Error) => {
         clearTimeout(timeout);
-        reject(err);
+        const message = err.message?.includes('auth')
+          ? 'Session expired. Please log in again.'
+          : err.message || 'Could not connect to chat server.';
+        reject(new Error(message));
       });
     });
   }
 
   disconnect() {
+    this.socket?.removeAllListeners();
     this.socket?.disconnect();
     this.socket = null;
+    this.connecting = null;
   }
 
   getSocket(): Socket | null {
     return this.socket;
+  }
+
+  isConnected(): boolean {
+    return Boolean(this.socket?.connected);
   }
 
   joinQueue(preferences?: {
@@ -71,7 +110,10 @@ class SocketService {
     gender?: string;
     interests?: string[];
   }) {
-    this.socket?.emit('join_queue', preferences || {});
+    if (!this.socket?.connected) {
+      throw new Error('Socket is not connected');
+    }
+    this.socket.emit('join_queue', preferences || {});
   }
 
   nextUser() {

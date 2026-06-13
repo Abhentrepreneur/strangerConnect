@@ -62,17 +62,35 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
   useEffect(() => {
     const init = async () => {
       try {
+        if (!socketService.isConnected()) {
+          await socketService.connect();
+        }
+
         const isInitiator = user?.id ? user.id < partner.id : true;
         const stream = await webrtcService.initialize(sessionId, isInitiator);
         setLocalStreamUrl(stream.toURL());
 
         webrtcService.onRemoteStream = (remoteStream) => {
+          remoteStream.getAudioTracks().forEach((track) => {
+            track.enabled = true;
+          });
           setRemoteStreamUrl(remoteStream.toURL());
         };
 
         webrtcService.onNetworkQuality = setNetworkQuality;
-      } catch {
-        Alert.alert('Error', 'Failed to start video. Please check camera permissions.');
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to start video chat.';
+        const isPermission =
+          message.toLowerCase().includes('permission') ||
+          message.toLowerCase().includes('not allowed');
+
+        Alert.alert(
+          isPermission ? 'Permissions Required' : 'Connection Failed',
+          isPermission
+            ? 'Please allow camera and microphone access in your phone settings, then try again.'
+            : message,
+        );
       }
     };
 
@@ -155,13 +173,15 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
   };
 
   const handleToggleMute = () => {
+    const nextMuted = !isMuted;
     toggleMute();
-    webrtcService.toggleAudio(!isMuted);
+    webrtcService.toggleAudio(!nextMuted);
   };
 
   const handleToggleVideo = () => {
+    const nextVideoEnabled = !isVideoEnabled;
     toggleVideo();
-    webrtcService.toggleVideo(!isVideoEnabled);
+    webrtcService.toggleVideo(nextVideoEnabled);
   };
 
   const qualityColors = {
@@ -174,7 +194,12 @@ export function VideoChatScreen({ navigation, route }: VideoChatScreenProps) {
   return (
     <View style={styles.container}>
       {remoteStreamUrl ? (
-        <RTCView streamURL={remoteStreamUrl} style={styles.remoteVideo} objectFit="cover" />
+        <RTCView
+          streamURL={remoteStreamUrl}
+          style={styles.remoteVideo}
+          objectFit="cover"
+          zOrderMediaOverlay={false}
+        />
       ) : (
         <View style={styles.remotePlaceholder}>
           <Text style={styles.placeholderAvatar}>

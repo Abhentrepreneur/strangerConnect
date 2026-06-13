@@ -7,19 +7,33 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://strangerconnect-production.up.railway.app/api/v1",
+        "EXPO_PUBLIC_SOCKET_URL": "https://strangerconnect-production.up.railway.app"
+      },
       "android": {
         "buildType": "apk"
       }
     },
     "preview": {
       "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://strangerconnect-production.up.railway.app/api/v1",
+        "EXPO_PUBLIC_SOCKET_URL": "https://strangerconnect-production.up.railway.app",
+        "EXPO_PUBLIC_USE_LOCAL": "false"
+      },
       "android": {
         "buildType": "apk"
       }
     },
     "production": {
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://strangerconnect-production.up.railway.app/api/v1",
+        "EXPO_PUBLIC_SOCKET_URL": "https://strangerconnect-production.up.railway.app",
+        "EXPO_PUBLIC_USE_LOCAL": "false"
+      },
       "android": {
-        "buildType": "app-bundle"
+        "buildType": "apk"
       }
     }
   },

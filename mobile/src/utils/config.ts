@@ -1,95 +1,77 @@
-import { Platform } from 'react-native';
 import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
-const INVALID_CLIENT_HOSTS = new Set(['0.0.0.0', 'localhost', '127.0.0.1']);
-const EMULATOR_ONLY_HOSTS = new Set(['10.0.2.2', 'localhost', '127.0.0.1']);
+/**
+ * Production backend on Railway.
+ * Hardcoded so release APKs always use this URL — never depends on .env or Metro.
+ */
+export const PRODUCTION_API_URL =
+  'https://strangerconnect-production.up.railway.app/api/v1';
 
-/** Your laptop's LAN IP — set in mobile/.env as EXPO_PUBLIC_DEV_SERVER_HOST */
-function getExplicitDevHost(): string | null {
-  const host = process.env.EXPO_PUBLIC_DEV_SERVER_HOST?.trim();
-  if (host && !INVALID_CLIENT_HOSTS.has(host)) {
-    return host;
-  }
-  return null;
+export const PRODUCTION_SOCKET_URL =
+  'https://strangerconnect-production.up.railway.app';
+
+type ExtraConfig = {
+  apiUrl?: string;
+  socketUrl?: string;
+};
+
+function getExtra(): ExtraConfig {
+  const manifestExtra = (Constants as { manifest?: { extra?: ExtraConfig } }).manifest?.extra;
+  const extra = Constants.expoConfig?.extra ?? manifestExtra ?? {};
+  return extra as ExtraConfig;
 }
 
-/** Metro bundler host when dev client is connected to Metro. */
-function getMetroHost(): string | null {
-  const sources = [
-    Constants.expoConfig?.hostUri,
-    (Constants as { manifest?: { debuggerHost?: string } }).manifest?.debuggerHost,
-    Constants.expoGoConfig?.debuggerHost,
-  ];
-
-  for (const source of sources) {
-    if (!source) continue;
-    const host = source.split(':')[0]?.trim();
-    if (host && !INVALID_CLIENT_HOSTS.has(host)) {
-      return host;
-    }
-  }
-
-  return null;
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, '');
 }
 
-function extractHostFromUrl(url?: string): string | null {
-  if (!url) return null;
-
-  try {
-    const host = new URL(url).hostname;
-    if (!host || INVALID_CLIENT_HOSTS.has(host)) return null;
-    if (Constants.isDevice && EMULATOR_ONLY_HOSTS.has(host)) return null;
-    return host;
-  } catch {
-    return null;
-  }
+function normalizeApiUrl(url: string): string {
+  const clean = stripTrailingSlash(url);
+  if (clean.endsWith('/api/v1')) return clean;
+  return `${clean}/api/v1`;
 }
 
-function resolveServerHost(): string {
-  // 1. Explicit laptop IP from .env (best for physical device)
-  const explicit = getExplicitDevHost();
-  if (explicit) return explicit;
-
-  // 2. Metro host when running via `expo start` + dev client
-  const metro = getMetroHost();
-  if (metro) return metro;
-
-  // 3. Valid host parsed from EXPO_PUBLIC_API_URL / SOCKET_URL
-  const fromApiEnv = extractHostFromUrl(process.env.EXPO_PUBLIC_API_URL);
-  if (fromApiEnv) return fromApiEnv;
-
-  const fromSocketEnv = extractHostFromUrl(process.env.EXPO_PUBLIC_SOCKET_URL);
-  if (fromSocketEnv) return fromSocketEnv;
-
-  // 4. Platform fallbacks (emulators / simulators only)
-  if (Platform.OS === 'ios' && !Constants.isDevice) {
-    return 'localhost';
-  }
-
-  if (!Constants.isDevice) {
-    return '10.0.2.2';
-  }
-
-  // Physical device with no valid config — return explicit env hint host
-  return explicit ?? 'CONFIGURE_DEV_SERVER_HOST';
+function isLocalDevEnabled(): boolean {
+  return __DEV__ && process.env.EXPO_PUBLIC_USE_LOCAL === 'true';
 }
 
+function getLocalHost(): string {
+  const devHost = process.env.EXPO_PUBLIC_DEV_SERVER_HOST?.trim();
+  if (Platform.OS === 'android') {
+    return devHost || '10.0.2.2';
+  }
+  return devHost || 'localhost';
+}
+
+/** API base URL — always Railway in release builds */
 export function getApiUrl(): string {
-  const host = resolveServerHost();
-  return `http://${host}:3000/api/v1`;
+  if (isLocalDevEnabled()) {
+    return `http://${getLocalHost()}:3000/api/v1`;
+  }
+
+  return normalizeApiUrl(getExtra().apiUrl || PRODUCTION_API_URL);
 }
 
+/** Socket.IO server URL — always Railway in release builds */
 export function getSocketUrl(): string {
-  const host = resolveServerHost();
-  return `http://${host}:3000`;
+  if (isLocalDevEnabled()) {
+    return `http://${getLocalHost()}:3000`;
+  }
+
+  return stripTrailingSlash(getExtra().socketUrl || PRODUCTION_SOCKET_URL);
 }
 
-/** For debugging — shows which server the app is targeting. */
-export function getResolvedServerInfo(): { host: string; apiUrl: string; socketUrl: string } {
-  const host = resolveServerHost();
+export function isSecureServer(): boolean {
+  return getSocketUrl().startsWith('https://');
+}
+
+export function getResolvedServerInfo() {
   return {
-    host,
-    apiUrl: `http://${host}:3000/api/v1`,
-    socketUrl: `http://${host}:3000`,
+    mode: isLocalDevEnabled() ? 'local' : 'production',
+    apiUrl: getApiUrl(),
+    socketUrl: getSocketUrl(),
+    isDevice: Constants.isDevice,
+    isDev: __DEV__,
   };
 }
